@@ -1,21 +1,24 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import Optional
-from contextlib import asynccontextmanager
 import os
-from acestep.pipeline_ace_step import ACEStepPipeline
 import uuid
-import time
+import base64
+import torch
+import torchaudio
 import soundfile as sf
-    
+import runpod
+import traceback
+from acestep.pipeline_ace_step import ACEStepPipeline
+from io import BytesIO
+
+# --- Model Loading at Startup ---
+INIT_ERROR_FILE = "/tmp/init_error.log"
 model_demo = None
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global model_demo
+try:
+    if os.path.exists(INIT_ERROR_FILE):
+        os.remove(INIT_ERROR_FILE)
+    print("Loading ACE-Step pipeline...")
     current_dir = os.path.dirname(os.path.abspath(__file__))
     checkpoint_path = os.path.join(current_dir, "checkpoints")
-    print(f"📥 Loading models from {checkpoint_path}...")
     model_demo = ACEStepPipeline(
         checkpoint_dir=checkpoint_path,
         dtype="bfloat16",
@@ -25,61 +28,38 @@ async def lifespan(app: FastAPI):
     )
     if not model_demo.loaded:
         model_demo.load_checkpoint()
-        print("✅ Models loaded successfully")
-    yield
+    print("✅ ACE-Step model loaded successfully.")
+except Exception as e:
+    tb_str = traceback.format_exc()
+    with open(INIT_ERROR_FILE, "w") as f:
+        f.write(f"Failed to initialize model: {tb_str}")
+    model_demo = None
 
-app = FastAPI(title="ACEStep Music Generation API", lifespan=lifespan)
+# --- Helper: Save WAV from tensor
+def save_wav_bytes(tensor, sample_rate=48000):
+    buffer = BytesIO()
+    audio = tensor.float().cpu()
+    if audio.dim() == 1:
+        data = audio.numpy()
+    else:
+        data = audio.transpose(0, 1).numpy()
+    sf.write(buffer, data, sample_rate, format="wav")
+    return buffer.getvalue()
 
-class ACEStepGenerateInput(BaseModel):
-    audio_duration: float
-    prompt: str
-    lyrics: Optional[str] = "[inst]"
+# --- RunPod Handler ---
+def handler(event):
+    if os.path.exists(INIT_ERROR_FILE):
+        with open(INIT_ERROR_FILE, "r") as f:
+            error_msg = f.read()
+        return {"error": f"Model failed to load: {error_msg}"}
 
-class ACEStepOutput(BaseModel):
-    status: str
-    output_path: str
-    message: str
+    # Parse input
+    job_input = event.get("input", {})
+    audio_duration = float(job_input.get("audio_duration", 120))
+    prompt = job_input.get("prompt", "rock guitar solo")
+    lyrics = job_input.get("lyrics", "[inst]")
 
-def patch_save_method(model):
-    original_save = model.save_wav_file
-    def patched_save(target_wav, idx, save_path=None, sample_rate=48000, format="wav"):
-        import time
-        if save_path is None:
-            base_path = "./outputs"
-            os.makedirs(base_path, exist_ok=True)
-            output_path_wav = f"{base_path}/output_{time.strftime('%Y%m%d%H%M%S')}_{idx}.{format}"
-        else:
-            if os.path.isdir(save_path):
-                output_path_wav = os.path.join(save_path, f"output_{time.strftime('%Y%m%d%H%M%S')}_{idx}.{format}")
-            else:
-                output_path_wav = save_path
-            output_dir = os.path.dirname(os.path.abspath(output_path_wav))
-            if output_dir:
-                os.makedirs(output_dir, exist_ok=True)
-        target_wav = target_wav.float().cpu()
-        if target_wav.dim() == 1:
-            audio_data = target_wav.numpy()
-        else:
-            audio_data = target_wav.transpose(0, 1).numpy()
-        sf.write(output_path_wav, audio_data, sample_rate)
-        return output_path_wav
-    return original_save, patched_save
-
-@app.post("/generate", response_model=ACEStepOutput)
-async def generate_audio_simple(input_data: ACEStepGenerateInput):
-    global model_demo
-    if model_demo is None or not model_demo.loaded:
-        raise HTTPException(status_code=503, detail="Model not loaded")
-
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    output_dir = os.path.join(current_dir, "outputs")
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f"output_{uuid.uuid4().hex}.wav")
-
-    original_save, patched_save = patch_save_method(model_demo)
-    model_demo.save_wav_file = patched_save
-
-    # Hardcoded parameters
+    # Hardcoded parameters for ACE-Step generation
     infer_step = 60
     guidance_scale = 14.0
     scheduler_type = "euler"
@@ -96,13 +76,14 @@ async def generate_audio_simple(input_data: ACEStepGenerateInput):
     guidance_scale_text = 3.0
     guidance_scale_lyric = 0.0
 
-    start_time = time.time()
     try:
+        print(f"🎵 Starting generation: {prompt} for {audio_duration}s")
+        output_path = f"/tmp/generate_{uuid.uuid4().hex}.wav"
         model_demo(
             format="wav",
-            audio_duration=input_data.audio_duration,
-            prompt=input_data.prompt,
-            lyrics=input_data.lyrics if input_data.lyrics else "[inst]",
+            audio_duration=audio_duration,
+            prompt=prompt,
+            lyrics=lyrics,
             infer_step=infer_step,
             guidance_scale=guidance_scale,
             scheduler_type=scheduler_type,
@@ -120,24 +101,18 @@ async def generate_audio_simple(input_data: ACEStepGenerateInput):
             guidance_scale_lyric=guidance_scale_lyric,
             save_path=output_path,
         )
-    finally:
-        model_demo.save_wav_file = original_save
-    total_time = time.time() - start_time
-    print(f"[INFO] Audio generation took {total_time:.2f} seconds.")
+        with open(output_path, "rb") as f:
+            wav_bytes = f.read()
+        audio_base64 = base64.b64encode(wav_bytes).decode('utf-8')
+        print(f"✅ Audio generated ({len(wav_bytes)} bytes)")
+        return {
+            "audio_base64": audio_base64,
+            "format": "wav",
+            "status": "completed"
+        }
+    except Exception as e:
+        error_msg = traceback.format_exc()
+        print(f"❌ Generation error: {error_msg}")
+        return {"error": error_msg, "status": "failed"}
 
-    return ACEStepOutput(
-        status="success",
-        output_path=output_path,
-        message=f"Generated {input_data.audio_duration}s audio successfully in {total_time:.2f} seconds"
-    )
-
-
-@app.get("/health")
-async def health_check():
-    global model_demo
-    return {"status": "healthy", "model_loaded": model_demo is not None and model_demo.loaded}
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+runpod.serverless.start({"handler": handler})
