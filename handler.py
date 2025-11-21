@@ -2,13 +2,13 @@ import os
 import torch
 import runpod
 import base64
-from io import BytesIO
 import traceback
 import requests
 import urllib.parse
 import uuid
 import soundfile as sf
 import time
+from huggingface_hub import snapshot_download
 
 # --- Global Variables & Model Loading ---
 INIT_ERROR_FILE = "/tmp/init_error.log"
@@ -18,24 +18,46 @@ try:
     if os.path.exists(INIT_ERROR_FILE):
         os.remove(INIT_ERROR_FILE)
     
+    print("🔥 Python version:", os.popen("python --version").read().strip())
+    print("🔥 PyTorch version:", torch.__version__)
+    print("🔥 CUDA available:", torch.cuda.is_available())
+    if torch.cuda.is_available():
+        print("🔥 CUDA version:", torch.version.cuda)
+    
     print("Loading ACEStep model...")
     from acestep.pipeline_ace_step import ACEStepPipeline
     
-    checkpoint_path = "/app/checkpoints"
+    # Use Runpod network volume or download to persistent storage
+    checkpoint_path = os.environ.get("CHECKPOINT_PATH", "/runpod-volume/checkpoints")
+    os.makedirs(checkpoint_path, exist_ok=True)
     
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_path}")
+    # Download checkpoints if not present
+    checkpoint_file = os.path.join(checkpoint_path, "ace_step_v1_3.5b.safetensors")
+    if not os.path.exists(checkpoint_file):
+        print(f"📥 Downloading ACEStep checkpoints to {checkpoint_path}...")
+        try:
+            snapshot_download(
+                repo_id="ACE-Step/ACE-Step-v1-3.5B",
+                local_dir=checkpoint_path,
+                local_dir_use_symlinks=False,
+            )
+            print("✅ Checkpoints downloaded successfully")
+        except Exception as download_error:
+            print(f"❌ Failed to download checkpoints: {download_error}")
+            raise
+    else:
+        print(f"✅ Using cached checkpoints from {checkpoint_path}")
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
     
-    # Initialize ACEStep pipeline with optimized settings for serverless
+    # Initialize ACEStep with Python 3.12 compatible settings
     model_demo = ACEStepPipeline(
         checkpoint_dir=checkpoint_path,
-        dtype="bfloat16",  # Requires Ampere+ GPUs (A100, RTX 3090, etc.)
+        dtype="bfloat16",
         torch_compile=False,
-        cpu_offload=True,  # Memory optimization
-        overlapped_decode=True,  # Speed optimization
+        cpu_offload=True,
+        overlapped_decode=True,
     )
     
     if not model_demo.loaded:
@@ -47,12 +69,11 @@ except Exception as e:
     tb_str = traceback.format_exc()
     with open(INIT_ERROR_FILE, "w") as f:
         f.write(f"Failed to initialize ACEStep model: {tb_str}")
+    print(f"❌ Initialization error: {tb_str}")
     model_demo = None
 
 
-# --- Helper Functions ---
 def upload_to_gcs(signed_url, audio_bytes, content_type="audio/wav"):
-    """Upload audio to Google Cloud Storage using signed URL"""
     try:
         response = requests.put(
             signed_url,
@@ -61,7 +82,7 @@ def upload_to_gcs(signed_url, audio_bytes, content_type="audio/wav"):
             timeout=300
         )
         response.raise_for_status()
-        print(f"✅ Uploaded to GCS: {signed_url[:100]}...")
+        print(f"✅ Uploaded to GCS")
         return True
     except Exception as e:
         print(f"❌ GCS upload failed: {e}")
@@ -69,7 +90,6 @@ def upload_to_gcs(signed_url, audio_bytes, content_type="audio/wav"):
 
 
 def notify_backend(callback_url, status, error_message=None):
-    """Send webhook notification to backend"""
     try:
         parsed = urllib.parse.urlparse(callback_url)
         params = urllib.parse.parse_qs(parsed.query)
@@ -83,18 +103,16 @@ def notify_backend(callback_url, status, error_message=None):
             parsed.params, new_query, parsed.fragment
         ))
         
-        print(f"🔔 Calling webhook: {webhook_url}")
         response = requests.post(webhook_url, timeout=30)
         response.raise_for_status()
         print(f"✅ Backend notified: {status}")
         return True
     except Exception as e:
-        print(f"❌ Webhook notification failed: {e}")
+        print(f"❌ Webhook failed: {e}")
         return False
 
 
 def patch_save_method(model):
-    """Patch the save method to capture output path"""
     original_save = model.save_wav_file
 
     def patched_save(target_wav, idx, save_path=None, sample_rate=48000, format="wav"):
@@ -123,45 +141,30 @@ def patch_save_method(model):
     return original_save, patched_save
 
 
-# --- Runpod Handler ---
 def handler(event):
     """
-    Expected input format:
+    Input:
     {
         "input": {
             "audio_duration": 30.0,
-            "prompt": "upbeat pop song with piano",
-            "lyrics": "[inst]",  # Optional, defaults to "[inst]"
-            "callback_url": "https://...",  # Optional
-            "upload_urls": {"wav_url": "https://..."},  # Optional
-            
-            # Optional advanced parameters
-            "infer_step": 60,
-            "guidance_scale": 14.0,
-            "scheduler_type": "euler",
-            "cfg_type": "apg",
-            "omega_scale": 10.0,
-            "manual_seeds": [42, 99],
-            "guidance_interval": 0.5,
-            "use_erg_tag": true,
-            "use_erg_lyric": true,
-            "use_erg_diffusion": true
+            "prompt": "upbeat electronic music",
+            "lyrics": "[inst]",
+            "callback_url": "https://...",
+            "upload_urls": {"wav_url": "https://..."}
         }
     }
     """
     if os.path.exists(INIT_ERROR_FILE):
         with open(INIT_ERROR_FILE, "r") as f:
-            error_msg = f"Worker initialization failed: {f.read()}"
+            error_msg = f"Worker init failed: {f.read()}"
         return {"error": error_msg, "status": "failed"}
 
     job_input = event.get("input", {})
-    
-    # Required parameters
     audio_duration = job_input.get("audio_duration")
     prompt = job_input.get("prompt")
     
     if not audio_duration or not prompt:
-        error_msg = "Missing required parameters: audio_duration and prompt"
+        error_msg = "Missing: audio_duration and prompt"
         if job_input.get("callback_url"):
             notify_backend(job_input["callback_url"], "failed", error_msg)
         return {"error": error_msg, "status": "failed"}
@@ -170,7 +173,7 @@ def handler(event):
     upload_urls = job_input.get("upload_urls", {})
     
     try:
-        # Extract parameters with defaults
+        # Extract parameters
         lyrics = job_input.get("lyrics", "[inst]")
         infer_step = job_input.get("infer_step", 60)
         guidance_scale = job_input.get("guidance_scale", 14.0)
@@ -187,19 +190,15 @@ def handler(event):
         guidance_scale_text = job_input.get("guidance_scale_text", 3.0)
         guidance_scale_lyric = job_input.get("guidance_scale_lyric", 0.0)
         
-        print(f"🎵 Generating audio: prompt='{prompt}', duration={audio_duration}s")
+        print(f"🎵 Generating: prompt='{prompt}', duration={audio_duration}s")
         
-        # Setup output path
         output_path = f"/tmp/output_{uuid.uuid4().hex}.wav"
-        
-        # Patch save method
         original_save, patched_save = patch_save_method(model_demo)
         model_demo.save_wav_file = patched_save
         
         start_time = time.time()
         
         try:
-            # Generate audio
             model_demo(
                 format="wav",
                 audio_duration=audio_duration,
@@ -226,26 +225,21 @@ def handler(event):
             model_demo.save_wav_file = original_save
         
         generation_time = time.time() - start_time
-        print(f"✅ Audio generated in {generation_time:.2f}s")
+        print(f"✅ Generated in {generation_time:.2f}s")
         
-        # Read generated audio file
         with open(output_path, "rb") as f:
             audio_bytes = f.read()
         
-        # Upload to GCS if URL provided
         if upload_urls and upload_urls.get("wav_url"):
             upload_success = upload_to_gcs(upload_urls["wav_url"], audio_bytes)
             if not upload_success:
-                raise Exception("Failed to upload WAV to GCS")
+                raise Exception("GCS upload failed")
         
-        # Notify backend of completion
         if callback_url:
             notify_backend(callback_url, "completed")
         
-        # Encode audio as base64 for response
         audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
         
-        # Clean up temp file
         if os.path.exists(output_path):
             os.remove(output_path)
         
@@ -268,5 +262,4 @@ def handler(event):
         return {"error": error_msg, "status": "failed"}
 
 
-# --- Start Serverless Worker ---
 runpod.serverless.start({"handler": handler})
