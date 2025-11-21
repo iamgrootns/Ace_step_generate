@@ -1,5 +1,5 @@
-# ✅ This tag EXISTS - CUDA 12.4.0 with Ubuntu 22.04
-FROM nvidia/cuda:12.4.0-cudnn-devel-ubuntu22.04
+# CORRECT TAG - CUDA 12.4.1 with cuDNN 9.1.0.70
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 
 WORKDIR /app
 
