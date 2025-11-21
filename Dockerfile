@@ -1,9 +1,7 @@
-# Use verified Runpod PyTorch image with bfloat16 support (Ampere+ GPUs)
 FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
 WORKDIR /app
 
-# Install system dependencies for audio processing
 RUN apt-get update && apt-get install -y \
     git \
     ffmpeg \
@@ -11,17 +9,13 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy project files
 COPY . /app
 
-# Upgrade pip
 RUN pip install --upgrade pip
 
-# Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy checkpoint directory (ensure this exists in your build context)
-# The checkpoints should be in ./checkpoints/ during docker build
-COPY checkpoints /app/checkpoints
+# ✅ REMOVED: COPY checkpoints line
+# Checkpoints will be downloaded at runtime
 
 CMD ["python", "handler.py"]
