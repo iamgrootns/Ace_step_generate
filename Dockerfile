@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update
 
-# Install Python 3.12 (WITHOUT distutils - it's deprecated in 3.12)
+# Install Python 3.12 (no distutils needed)
 RUN apt-get install -y --no-install-recommends \
     python3.12 \
     python3.12-dev \
@@ -26,21 +26,21 @@ RUN apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install pip for Python 3.12 using get-pip.py
+# Install pip for Python 3.12
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12
 
-# Create symlinks for python command
+# Create symlinks
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 && \
     update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 
 # Upgrade pip
 RUN python3.12 -m pip install --upgrade pip setuptools wheel
 
-# Install PyTorch 2.9.1 with CUDA 12.4 support
+# ✅ Install PyTorch 2.6.0 (latest stable for CUDA 12.4)
 RUN pip install --no-cache-dir \
-    torch==2.9.1 \
-    torchvision==0.24.1 \
-    torchaudio==2.9.1 \
+    torch==2.6.0+cu124 \
+    torchvision==0.21.0+cu124 \
+    torchaudio==2.6.0+cu124 \
     --index-url https://download.pytorch.org/whl/cu124
 
 # Install dependencies
