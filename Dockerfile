@@ -1,4 +1,4 @@
-# CORRECT TAG - CUDA 12.4.1 with cuDNN 9.1.0.70
+# ✅ CUDA 12.4.1 with cuDNN
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 
 WORKDIR /app
@@ -6,15 +6,17 @@ WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# Install Python 3.12 on Ubuntu 22.04
-RUN apt-get update && apt-get install -y \
+# Install system dependencies and add deadsnakes PPA
+RUN apt-get update && apt-get install -y --no-install-recommends \
     software-properties-common \
     && add-apt-repository ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y \
+    && apt-get update
+
+# Install Python 3.12 (WITHOUT distutils - it's deprecated in 3.12)
+RUN apt-get install -y --no-install-recommends \
     python3.12 \
     python3.12-dev \
     python3.12-venv \
-    python3.12-distutils \
     git \
     wget \
     curl \
@@ -24,36 +26,40 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install pip for Python 3.12
+# Install pip for Python 3.12 using get-pip.py
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12
 
-# Create symlinks
-RUN ln -sf /usr/bin/python3.12 /usr/bin/python && \
-    ln -sf /usr/bin/python3.12 /usr/bin/python3
+# Create symlinks for python command
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 
 # Upgrade pip
 RUN python3.12 -m pip install --upgrade pip setuptools wheel
 
-# Install PyTorch 2.9.1 with CUDA 12.4
-RUN pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu124
+# Install PyTorch 2.9.1 with CUDA 12.4 support
+RUN pip install --no-cache-dir \
+    torch==2.9.1 \
+    torchvision==0.24.1 \
+    torchaudio==2.9.1 \
+    --index-url https://download.pytorch.org/whl/cu124
 
-# Install all dependencies
+# Install dependencies
 RUN pip install --no-cache-dir \
     runpod \
     requests \
     huggingface_hub \
-    soundfile \
-    scipy \
-    numpy \
     transformers \
     diffusers \
     accelerate \
+    soundfile \
+    librosa \
+    scipy \
+    numpy \
     einops \
     omegaconf \
     safetensors \
     sentencepiece \
     protobuf \
-    librosa \
     datasets \
     peft \
     gradio
