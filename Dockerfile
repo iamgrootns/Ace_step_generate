@@ -1,38 +1,27 @@
-# Use a verified Runpod PyTorch image with Python 3.11 and CUDA 12.1 (compatible with ACE-Step)
-FROM runpod/pytorch:2.4.0-py3.11-cuda12.1-devel-ubuntu22.04
+# Use verified Runpod PyTorch image with bfloat16 support (Ampere+ GPUs)
+FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
-# Set working directory
 WORKDIR /app
 
-# Install system dependencies (git, pkg-config, ffmpeg, build tools, libs for audio processing)
+# Install system dependencies for audio processing
 RUN apt-get update && apt-get install -y \
     git \
-    pkg-config \
     ffmpeg \
-    libavformat-dev \
-    libavcodec-dev \
-    libavdevice-dev \
-    libavutil-dev \
-    libavfilter-dev \
-    libswscale-dev \
-    libswresample-dev \
+    libsndfile1 \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy project files (including your FastAPI code and requirements.txt)
+# Copy project files
 COPY . /app
 
-# Upgrade pip to latest version
+# Upgrade pip
 RUN pip install --upgrade pip
 
-# Install Python dependencies from your requirements.txt (to be provided by you)
+# Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# (Optional) If a known compatible PyTorch rebuild is needed, uncomment and adjust below
-# RUN pip install --no-cache-dir --force-reinstall torch==2.3.1+cu121 torchvision==0.18.1+cu121 torchaudio==2.3.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+# Copy checkpoint directory (ensure this exists in your build context)
+# The checkpoints should be in ./checkpoints/ during docker build
+COPY checkpoints /app/checkpoints
 
-# Expose default FastAPI port
-EXPOSE 8000
-
-# Command to run your ACE-Step FastAPI app (replace app.py with your script filename)
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["python", "handler.py"]
