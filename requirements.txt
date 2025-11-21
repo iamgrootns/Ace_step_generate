@@ -32,6 +32,6 @@ tqdm
 fsspec
 tensorboard
 gradio
-
+torchcodec
 # ACEStep specific (if using pip install from GitHub)
 # ace_step==0.2.0
